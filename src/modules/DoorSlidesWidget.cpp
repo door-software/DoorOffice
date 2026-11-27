@@ -15,51 +15,32 @@
 #include <QMessageBox>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QGraphicsView>
+#include <QGraphicsScene>
+#include <QGraphicsRectItem>
+#include <QGraphicsEllipseItem>
+#include <QGraphicsPixmapItem>
+#include <QGraphicsTextItem>
+#include <QTextDocument>
+#include <QKeyEvent>
+#include <QResizeEvent>
 
 #include <QFileInfo>
 #include <QSizePolicy>
 #include <QXmlStreamWriter>
 #include <QProcess>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QSaveFile>
+#include <QCryptographicHash>
+#include <QByteArray>
 
 #include <utility>
 
 namespace door::modules {
 
 // ---------- SlideCanvas ----------------------------------------------------
-void SlideCanvas::paintEvent(QPaintEvent*)
-{
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.fillRect(rect(), m_slide.backgroundColor);
-
-    m_viewArea = viewAreaIn(rect());
-    const QRectF& area = m_viewArea;
-    const qreal w = area.width();
-    const qreal h = area.height();
-
-    for (const SlideItem& it : m_slide.shapes) {
-        QRectF r(it.rect.x() * w + area.x(), it.rect.y() * h + area.y(),
-                 it.rect.width() * w, it.rect.height() * h);
-        if (it.type == SlideItem::Type::Rect) p.fillRect(r, it.color);
-        else if (it.type == SlideItem::Type::Ellipse) {
-            p.setBrush(it.color); p.setPen(Qt::NoPen); p.drawEllipse(r);
-        } else if (it.type == SlideItem::Type::Image && !it.imagePath.isEmpty()) {
-            QPixmap pm(it.imagePath);
-            if (!pm.isNull()) p.drawPixmap(r, pm, QRectF(pm.rect()));
-        }
-    }
-    QFont f = p.font(); f.setPointSizeF(h * 0.05); f.setBold(true);
-    p.setFont(f); p.setPen(m_slide.accentColor);
-    QRectF tr(area.x() + w * 0.06, area.y() + h * 0.10, w * 0.88, h * 0.22);
-    p.drawText(tr, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, m_slide.title);
-    f.setPointSizeF(h * 0.025); f.setBold(false);
-    p.setFont(f);
-    p.drawText(area.adjusted(w * 0.06, h * 0.34, -w * 0.06, -h * 0.04),
-               Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap,
-               m_slide.body + "\n" + m_slide.subtitle);
-}
-
 QRectF SlideCanvas::viewAreaIn(const QRectF& region) const
 {
     const qreal aspect = 16.0 / 9.0;
@@ -70,82 +51,236 @@ QRectF SlideCanvas::viewAreaIn(const QRectF& region) const
                   region.y() + (region.height() - h) / 2.0, w, h);
 }
 
-QRectF SlideCanvas::itemViewRect(const SlideItem& it, const QRectF& area) const
+// ---------- SlideCanvas: construction & scene building --------------------
+SlideCanvas::SlideCanvas(QWidget* parent) : QGraphicsView(parent)
 {
-    return QRectF(area.x() + it.rect.x() * area.width(),
-                  area.y() + it.rect.y() * area.height(),
-                  it.rect.width() * area.width(),
-                  it.rect.height() * area.height());
+    m_scene = new QGraphicsScene(this);
+    setScene(m_scene);
+    setRenderHint(QPainter::Antialiasing);
+    setDragMode(QGraphicsView::NoDrag);
+    setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setAlignment(Qt::AlignCenter);
+    setMouseTracking(true);
+    viewport()->setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
 }
 
-int SlideCanvas::itemAt(const QPointF& pos, const QRectF& area) const
+void SlideCanvas::setSlide(const SlidePage& slide)
 {
-    for (int i = m_slide.shapes.size() - 1; i >= 0; --i) {
-        if (itemViewRect(m_slide.shapes[i], area).contains(pos))
-            return i;
+    m_slide = slide;
+    rebuildScene();
+}
+
+void SlideCanvas::resizeEvent(QResizeEvent* event)
+{
+    QGraphicsView::resizeEvent(event);
+    if (m_scene) {
+        m_viewArea = viewAreaIn(viewport()->rect());
+        m_scene->setSceneRect(m_viewArea);
     }
-    return -1;
 }
 
+// ---------- rebuildScene: build text items & shapes into scene ------------
+void SlideCanvas::rebuildScene()
+{
+    m_scene->clear();
+    m_textItemRole.clear();
+    m_shapeItemIndex.clear();
+
+    const qreal w = m_viewArea.width();
+    const qreal h = m_viewArea.height();
+    const qreal x = m_viewArea.x();
+    const qreal y = m_viewArea.y();
+
+    // Background rect
+    auto* bgRect = m_scene->addRect(m_viewArea, QPen(), m_slide.backgroundColor);
+    bgRect->setZValue(-10);
+
+    // Title text item (always present at top)
+    auto* titleItem = new QGraphicsTextItem();
+    QString titleDisplay = m_slide.title.isEmpty() ? QStringLiteral("Untitled Presentation") : m_slide.title;
+    titleItem->setHtml(QStringLiteral("<b>%1</b>").arg(titleDisplay.toHtmlEscaped()));
+    titleItem->setDefaultTextColor(m_slide.accentColor);
+    QFont titleFont; titleFont.setPointSizeF(h * 0.05); titleFont.setBold(true);
+    titleItem->setFont(titleFont);
+    titleItem->setTextWidth(w * 0.88);
+    titleItem->setPos(x + w * 0.06, y + h * 0.10);
+    titleItem->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsFocusable);
+    titleItem->setTextInteractionFlags(Qt::TextEditorInteraction);
+    titleItem->setZValue(10);
+    connect(titleItem->document(), &QTextDocument::contentsChanged, this, [this, titleItem]() {
+        if (m_textItemRole.value(titleItem) == "title") {
+            m_slide.title = titleItem->toPlainText();
+            emit contentChanged();
+        }
+    });
+    m_scene->addItem(titleItem);
+    m_textItemRole[titleItem] = "title";
+
+    // Body text item (includes subtitle)
+    QString bodyHtml = m_slide.body;
+    if (!m_slide.subtitle.isEmpty()) {
+        if (!bodyHtml.isEmpty()) bodyHtml += "<br/>";
+        bodyHtml += m_slide.subtitle;
+    }
+    if (bodyHtml.isEmpty()) bodyHtml = "Click to add text...";
+
+    auto* bodyItem = new QGraphicsTextItem();
+    bodyItem->setHtml(bodyHtml);
+    bodyItem->setDefaultTextColor(m_slide.accentColor);
+    QFont bodyFont; bodyFont.setPointSizeF(h * 0.025);
+    bodyItem->setFont(bodyFont);
+    bodyItem->setTextWidth(w * 0.88);
+    bodyItem->setPos(x + w * 0.06, y + h * 0.34);
+    bodyItem->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsFocusable);
+    bodyItem->setTextInteractionFlags(Qt::TextEditorInteraction);
+    bodyItem->setZValue(10);
+    connect(bodyItem->document(), &QTextDocument::contentsChanged, this, [this, bodyItem]() {
+        if (m_textItemRole.value(bodyItem) == "body") {
+            QString text = bodyItem->toPlainText();
+            int idx = text.lastIndexOf('\n');
+            if (idx >= 0) {
+                m_slide.body = text.left(idx);
+                m_slide.subtitle = text.mid(idx + 1);
+            } else {
+                m_slide.body = text;
+            }
+            emit contentChanged();
+        }
+    });
+    m_scene->addItem(bodyItem);
+    m_textItemRole[bodyItem] = "body";
+
+    // Shapes from model (shapes vector)
+    for (int i = 0; i < m_slide.shapes.size(); ++i) {
+        const SlideItem& it = m_slide.shapes[i];
+        QRectF r(x + it.rect.x() * w, y + it.rect.y() * h,
+                 it.rect.width() * w, it.rect.height() * h);
+
+        QGraphicsItem* shapeItem = nullptr;
+        if (it.type == SlideItem::Type::Rect) {
+            shapeItem = m_scene->addRect(r, QPen(Qt::black, 1), it.color);
+        } else if (it.type == SlideItem::Type::Ellipse) {
+            shapeItem = m_scene->addEllipse(r, QPen(Qt::black, 1), it.color);
+        } else if (it.type == SlideItem::Type::Image && !it.imagePath.isEmpty()) {
+            QPixmap pm(it.imagePath);
+            if (!pm.isNull()) {
+                shapeItem = m_scene->addPixmap(pm);
+                shapeItem->setPos(r.topLeft());
+                shapeItem->setScale(qMin(r.width() / pm.width(), r.height() / pm.height()));
+            }
+        } else if (it.type == SlideItem::Type::Text) {
+            // Editable text box shape
+            auto* textItem = new QGraphicsTextItem();
+            textItem->setPlainText(it.text.isEmpty() ? "Text box" : it.text);
+            textItem->setDefaultTextColor(it.color);
+            QFont tf; tf.setPointSizeF(h * 0.03);
+            textItem->setFont(tf);
+            textItem->setTextWidth(r.width());
+            textItem->setPos(r.topLeft());
+            textItem->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsFocusable);
+            textItem->setTextInteractionFlags(Qt::TextEditorInteraction);
+            textItem->setZValue(10);
+            connect(textItem->document(), &QTextDocument::contentsChanged, this, [this, textItem, i]() {
+                if (m_textItemRole.value(textItem).startsWith("shape:")) {
+                    if (i >= 0 && i < m_slide.shapes.size()) {
+                        m_slide.shapes[i].text = textItem->toPlainText();
+                        emit contentChanged();
+                    }
+                }
+            });
+            m_scene->addItem(textItem);
+            m_textItemRole[textItem] = QString("shape:%1").arg(i);
+            m_shapeItemIndex[textItem] = i;
+            continue;
+        }
+
+        if (shapeItem) {
+            shapeItem->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsFocusable);
+            shapeItem->setZValue(5);
+            m_shapeItemIndex[shapeItem] = i;
+        }
+    }
+}
+
+// ---------- SlideCanvas: mouse handling (focus & drag) --------------------
 void SlideCanvas::mousePressEvent(QMouseEvent* event)
 {
-    const QPointF pos = event->position();
-    m_viewArea = viewAreaIn(rect());
-    const int index = itemAt(pos, m_viewArea);
-    if (index >= 0) {
-        m_selectedIndex = index;
-        m_dragging = true;
-        m_resizing = false;
-        m_dragStartPos = pos;
-        m_dragStartNorm = m_slide.shapes[index].rect;
-    } else {
-        m_selectedIndex = -1;
-        m_dragging = false;
-        m_resizing = false;
+    const QPointF scenePos = mapToScene(event->pos());
+    QGraphicsItem* item = m_scene->itemAt(scenePos, transform());
+
+    // Identify whether the click landed on a text item
+    auto findTextItem = [](QGraphicsItem* it) -> QGraphicsTextItem* {
+        for (QGraphicsItem* p = it; p; p = p->parentItem()) {
+            if (auto* t = qgraphicsitem_cast<QGraphicsTextItem*>(p))
+                return t;
+        }
+        return nullptr;
+    };
+
+    QGraphicsTextItem* textItem = findTextItem(item);
+
+    if (item && item != m_scene->items().first()) {  // not the background rect
+        if (textItem) {
+            // Give text item keyboard focus so typing edits immediately.
+            QGraphicsView::mousePressEvent(event);
+            if (textItem->flags() & QGraphicsItem::ItemIsFocusable) {
+                textItem->setFocus(Qt::MouseFocusReason);
+            }
+            return;
+        }
+        // Non-text shape: start free drag
+        QGraphicsItem* shapeRoot = item;
+        if (m_shapeItemIndex.contains(shapeRoot)) {
+            m_draggingShape = true;
+            m_dragShapeIndex = m_shapeItemIndex[shapeRoot];
+            m_dragStartScenePos = scenePos;
+            m_dragStartShapeRect = m_slide.shapes[m_dragShapeIndex].rect;
+            event->accept();
+            return;
+        }
     }
-    update();
+
+    // Click on empty area - clear text focus cleanly
+    QGraphicsView::mousePressEvent(event);
+    if (QGraphicsItem* focus = m_scene->focusItem()) {
+        focus->clearFocus();
+    }
 }
 
 void SlideCanvas::mouseMoveEvent(QMouseEvent* event)
 {
-    if (!m_dragging || m_selectedIndex < 0 || m_selectedIndex >= m_slide.shapes.size())
+    if (m_draggingShape && m_dragShapeIndex >= 0 && m_dragShapeIndex < m_slide.shapes.size()
+        && m_viewArea.width() > 0 && m_viewArea.height() > 0) {
+        const QPointF scenePos = mapToScene(event->pos());
+        const qreal dx = (scenePos.x() - m_dragStartScenePos.x()) / m_viewArea.width();
+        const qreal dy = (scenePos.y() - m_dragStartScenePos.y()) / m_viewArea.height();
+
+        QRectF newRect = m_dragStartShapeRect;
+        newRect.moveTo(qBound(0.0, m_dragStartShapeRect.x() + dx, 1.0 - newRect.width()),
+                       qBound(0.0, m_dragStartShapeRect.y() + dy, 1.0 - newRect.height()));
+        m_slide.shapes[m_dragShapeIndex].rect = newRect;
+        event->accept();
         return;
-
-    const QPointF cur = event->position();
-    const qreal dx = (cur.x() - m_dragStartPos.x()) / m_viewArea.width();
-    const qreal dy = (cur.y() - m_dragStartPos.y()) / m_viewArea.height();
-
-    QRectF newRect = m_dragStartNorm;
-    if (m_resizing) {
-        newRect.setWidth(qBound(kMinItemSize, m_dragStartNorm.width() + dx, kMaxItemSize));
-        newRect.setHeight(qBound(kMinItemSize, m_dragStartNorm.height() + dy, kMaxItemSize));
-    } else {
-        qreal x = m_dragStartNorm.x() + dx;
-        qreal y = m_dragStartNorm.y() + dy;
-        x = qBound(0.0, x, 1.0 - newRect.width());
-        y = qBound(0.0, y, 1.0 - newRect.height());
-        newRect.moveTo(x, y);
     }
-    m_slide.shapes[m_selectedIndex].rect = newRect;
-    update();
+    QGraphicsView::mouseMoveEvent(event);
 }
 
 void SlideCanvas::mouseReleaseEvent(QMouseEvent* event)
 {
-    Q_UNUSED(event);
-    if (m_dragging || m_resizing) {
-        if (m_selectedIndex >= 0 && m_selectedIndex < m_slide.shapes.size())
-            emit itemRectChanged(m_selectedIndex, m_slide.shapes[m_selectedIndex].rect);
-        m_dragging = false;
-        m_resizing = false;
-        m_dragStartPos = QPointF(0, 0);
-        update();
+    if (m_draggingShape) {
+        if (m_dragShapeIndex >= 0 && m_dragShapeIndex < m_slide.shapes.size())
+            emit itemRectChanged(m_dragShapeIndex, m_slide.shapes[m_dragShapeIndex].rect);
+        m_draggingShape = false;
+        m_dragShapeIndex = -1;
+        event->accept();
+        return;
     }
+    QGraphicsView::mouseReleaseEvent(event);
 }
 
-// ---------- DoorSlidesWidget ---------------------------------------------
-
-// ---------- DoorSlidesWidget ---------------------------------------------
 DoorSlidesWidget::DoorSlidesWidget(QWidget* parent) : QWidget(parent) { buildUi(); }
 DoorSlidesWidget::~DoorSlidesWidget() = default;
 
@@ -173,6 +308,8 @@ void DoorSlidesWidget::buildUi()
     connect(delBtn, &QPushButton::clicked, this, &DoorSlidesWidget::deleteSlide);
     QPushButton* shapeBtn = new QPushButton(QStringLiteral("Insert Shape"));
     connect(shapeBtn, &QPushButton::clicked, this, &DoorSlidesWidget::insertShape);
+    QPushButton* textBtn = new QPushButton(QStringLiteral("Insert Text Box"));
+    connect(textBtn, &QPushButton::clicked, this, &DoorSlidesWidget::insertTextBox);
     QPushButton* imgBtn = new QPushButton(QStringLiteral("Insert Image"));
     connect(imgBtn, &QPushButton::clicked, this, &DoorSlidesWidget::insertImage);
     QPushButton* presentBtn = new QPushButton(QStringLiteral("Present (F5)"));
@@ -184,13 +321,22 @@ void DoorSlidesWidget::buildUi()
     top->addWidget(addBtn); top->addWidget(dupBtn); top->addWidget(upBtn);
     top->addWidget(downBtn); top->addWidget(delBtn);
     top->addStretch(1);
-    top->addWidget(shapeBtn); top->addWidget(imgBtn); top->addWidget(presentBtn);
+    top->addWidget(shapeBtn); top->addWidget(textBtn); top->addWidget(imgBtn); top->addWidget(presentBtn);
     root->addLayout(top);
 
     // ---- center: live-rendered canvas + inspector ----
     QHBoxLayout* center = new QHBoxLayout();
     m_canvas = new SlideCanvas(this);
     center->addWidget(m_canvas, 1);
+    connect(m_canvas, &SlideCanvas::contentChanged, this, [this]{
+        // Copy canvas's current (edited) slide back into the deck
+        if (m_deck.currentIndex() >= 0 && m_deck.currentIndex() < m_deck.pages.size()) {
+            m_deck.pages[m_deck.currentIndex()] = m_canvas->slide();
+        }
+        emit m_deck.deckModified();
+        emit contentChanged();
+        emit titleChanged(displayName());
+    });
     QVBoxLayout* insp = new QVBoxLayout();
     insp->addWidget(new QLabel(QStringLiteral("Inspector")));
     m_notes = new QTextEdit();
@@ -308,6 +454,17 @@ void DoorSlidesWidget::insertShape()
     SlidePage& p = const_cast<SlidePage&>(m_deck.pageAt(m_deck.currentIndex()));
     p.shapes.append(it);
     renderCurrent();
+    emit m_deck.deckModified();
+    emit titleChanged(displayName());
+}
+
+void DoorSlidesWidget::insertTextBox()
+{
+    SlidePage& p = const_cast<SlidePage&>(m_deck.pageAt(m_deck.currentIndex()));
+    SlideItem it; it.type = SlideItem::Type::Text; it.text = ""; it.color = m_deck.pageAt(m_deck.currentIndex()).accentColor;
+    it.rect = QRectF(0.25, 0.25, 0.5, 0.3);
+    p.shapes.append(it);
+    m_canvas->rebuildScene();
     emit m_deck.deckModified();
     emit titleChanged(displayName());
 }

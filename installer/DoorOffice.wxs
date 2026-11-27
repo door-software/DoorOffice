@@ -1,0 +1,55 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Door Office" Language="1033" Version="1.0.0" Manufacturer="Door" UpgradeCode="6a1f8f4e-3b2d-4c5e-9a7b-1d2e3f4a5b6c">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Door Office is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <UIRef Id="WixUI_FeatureTree" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Door Office">
+          <Directory Id="PlatformsFolder" Name="platforms" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Door Office" />
+      </Directory>
+      <Directory Id="DesktopFolder" />
+    </Directory>
+    <Feature Id="MainFeature" Title="Door Office Core" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="PlatformComponents" />
+    </Feature>
+    <Feature Id="DesktopShortcutFeature" Title="Create Desktop Shortcut (Recommended)" Level="1">
+      <ComponentGroupRef Id="DesktopComponents" />
+    </Feature>
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="cmpDoorOfficeExe" Guid="8e2f1a3c-4b6d-7c9a-2d1e-3f4a5b6c7d8e" Win64="yes">
+        <File Id="filDoorOfficeExe" Source="build\Release\DoorOffice.exe" Name="DoorOffice.exe" />
+        <Shortcut Id="StartMenuShortcut" Name="Door Office" Description="Door Office" Target="[INSTALLFOLDER]DoorOffice.exe" WorkingDirectory="INSTALLFOLDER" Directory="ApplicationProgramsFolder" />
+      </Component>
+      <Component Id="cmpDoorOfficeIcon" Guid="9f3c2d4e-5a6b-7c8d-9e0f-1a2b3c4d5e6f" Win64="yes">
+        <File Id="filDoorOfficeIco" Source="resources\DoorOffice.ico" Name="DoorOffice.ico" />
+      </Component>
+      <Component Id="cmpQtDlls" Guid="a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d" Win64="yes">
+        <File Id="filQtCore" Source="build\Release\Qt6Core.dll" Name="Qt6Core.dll" />
+        <File Id="filQtGui" Source="build\Release\Qt6Gui.dll" Name="Qt6Gui.dll" />
+        <File Id="filQtNetwork" Source="build\Release\Qt6Network.dll" Name="Qt6Network.dll" />
+        <File Id="filQtPrintSupport" Source="build\Release\Qt6PrintSupport.dll" Name="Qt6PrintSupport.dll" />
+        <File Id="filQtSvg" Source="build\Release\Qt6Svg.dll" Name="Qt6Svg.dll" />
+        <File Id="filQtWidgets" Source="build\Release\Qt6Widgets.dll" Name="Qt6Widgets.dll" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="PlatformComponents" Directory="PlatformsFolder">
+      <Component Id="cmpQtPlatform" Guid="c3d4e5f6-a7b8-9c0d-1e2f-3a4b5c6d7e8f" Win64="yes">
+        <File Id="filQtWindows" Source="build\Release\platforms\qwindows.dll" Name="qwindows.dll" />
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="DesktopComponents" Directory="DesktopFolder">
+      <Component Id="cmpDesktopShortcut" Guid="b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e" Win64="yes">
+        <Shortcut Id="DesktopShortcut" Name="Door Office.lnk" Description="Door Office" Target="[INSTALLFOLDER]DoorOffice.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\DoorOffice\DesktopShortcut" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Product>
+</Wix>
